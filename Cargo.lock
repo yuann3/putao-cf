@@ -15,21 +15,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8318a53db07bb3f8dca91a600466bdb3f2eaadeedfdbcf02e1accbad9271ba50"
 
 [[package]]
-name = "codecrafters-grep"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "thiserror",
-]
-
-[[package]]
 name = "proc-macro2"
 version = "1.0.86"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e719e8df665df0d1c8fbfd238015744736151d4445ec0836b8e628aae103b77"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "putao"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "thiserror",
 ]
 
 [[package]]
