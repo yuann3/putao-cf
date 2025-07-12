@@ -5,6 +5,8 @@ use std::process;
 fn match_pattern(input_line: &str, pattern: &str) -> bool {
     if pattern.chars().count() == 1 {
         return input_line.contains(pattern);
+    } else if pattern == "\\d" {
+       input_line.chars().any(|c| ('0' ..='9').contains(&c))
     } else {
         panic!("Unhandled pattern: {}", pattern)
     }
