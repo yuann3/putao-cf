@@ -2,24 +2,88 @@ use std::env;
 use std::io;
 use std::process;
 
-fn match_pattern(input_line: &str, pattern: &str) -> bool {
-    if pattern.chars().count() == 1 {
-        return input_line.contains(pattern);
-    } else if pattern == "\\d" {
-        input_line.chars().any(|c| ('0'..='9').contains(&c))
-    } else if pattern == "\\w" {
-        input_line
-            .chars()
-            .any(|c| c.is_ascii_alphanumeric() || c == '_')
-    } else if pattern.starts_with("[^") && pattern.ends_with(']') {
-        let inner = &pattern[2..pattern.len() - 1];
-        input_line.chars().any(|c| !inner.contains(c))
-    } else if pattern.starts_with('[') && pattern.ends_with(']') {
-        let inner = &pattern[1..pattern.len() - 1];
-        input_line.chars().any(|c| inner.contains(c))
-    } else {
-        panic!("Unhandled pattern: {}", pattern)
+enum PatternElement {
+    Literal(char),
+    Digit,
+    Word,
+    PosGroup(String),
+    NegGroup(String),
+}
+
+fn parse_pattern(pattern: &str) -> Vec<PatternElement> {
+    let mut elements = Vec::new();
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' {
+            i += 1;
+            if i >= chars.len() {
+                panic!("Invalid pattern: incomplete escape");
+            }
+            match chars[i] {
+                '\\' => elements.push(PatternElement::Literal('\\')),
+                'd' => elements.push(PatternElement::Digit),
+                'w' => elements.push(PatternElement::Word),
+                _ => panic!("Unhandled escape: \\{}", chars[i]),
+            }
+        } else if c == '[' {
+            i += 1;
+            let mut neg = false;
+            if i < chars.len() && chars[i] == '^' {
+                neg = true;
+                i += 1;
+            }
+            let mut inner = String::new();
+            while i < chars.len() && chars[i] != ']' {
+                inner.push(chars[i]);
+                i += 1;
+            }
+            if i >= chars.len() || chars[i] != ']' {
+                panic!("Unhandled pattern: unclosed group");
+            }
+            if neg {
+                elements.push(PatternElement::NegGroup(inner));
+            } else {
+                elements.push(PatternElement::PosGroup(inner));
+            }
+        } else {
+            elements.push(PatternElement::Literal(c));
+        }
+        i += 1;
     }
+    elements
+}
+
+fn match_pattern(input_line: &str, pattern: &str) -> bool {
+    let elements = parse_pattern(pattern);
+    if elements.is_empty() {
+        return true;
+    }
+    let input_chars: Vec<char> = input_line.chars().collect();
+    let pat_len = elements.len();
+    for start in 0..=input_chars.len().saturating_sub(pat_len) {
+        let mut matched = true;
+        for j in 0..pat_len {
+            let ch = input_chars[start + j];
+            let elem = &elements[j];
+            let this_match = match elem {
+                PatternElement::Literal(l) => ch == *l,
+                PatternElement::Digit => ch.is_ascii_digit(),
+                PatternElement::Word => ch.is_ascii_alphanumeric() || ch == '_',
+                PatternElement::PosGroup(inner) => inner.contains(ch),
+                PatternElement::NegGroup(inner) => !inner.contains(ch),
+            };
+            if !this_match {
+                matched = false;
+                break;
+            }
+        }
+        if matched {
+            return true;
+        }
+    }
+    false
 }
 
 //  echo <input_text> | cargo run -E <pattern>
