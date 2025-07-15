@@ -11,6 +11,9 @@ fn match_pattern(input_line: &str, pattern: &str) -> bool {
         input_line
             .chars()
             .any(|c| c.is_ascii_alphanumeric() || c == '_')
+    } else if pattern.starts_with("[^") && pattern.ends_with(']') {
+        let inner = &pattern[2..pattern.len() - 1];
+        input_line.chars().any(|c| !inner.contains(c))
     } else if pattern.starts_with('[') && pattern.ends_with(']') {
         let inner = &pattern[1..pattern.len() - 1];
         input_line.chars().any(|c| inner.contains(c))
