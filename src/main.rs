@@ -7,6 +7,7 @@ enum PatternElement {
     Literal(char),
     Digit,
     Word,
+    Any,
     PosGroup(String),
     NegGroup(String),
     Optional(Box<PatternElement>),
@@ -63,7 +64,11 @@ fn parse_pattern(pattern: &str) -> (Vec<PatternElement>, bool, bool) {
             end_anchored = true;
             i += 1;
         } else {
-            base = Some(PatternElement::Literal(c));
+            if c == '.' {
+                base = Some(PatternElement::Any);
+            } else {
+                base = Some(PatternElement::Literal(c));
+            }
             i += 1;
         }
         if let Some(mut elem) = base {
@@ -109,23 +114,23 @@ fn try_match_from(pos: usize, elems: &[PatternElement], input_chars: &[char]) ->
     let elem = &elems[0];
     let rest = &elems[1..];
     match elem {
-        PatternElement::OneOrMore(inner) => {
-            let mut current = pos;
-            let mut after_reps: Vec<usize> = vec![];
-            loop {
-                if let Some(new_pos) = try_match_from(current, &[*inner.clone()], input_chars) {
-                    current = new_pos;
-                    after_reps.push(current);
+        PatternElement::OneOrMore(ref inner) => {
+            fn match_one_or_more(
+                pos: usize,
+                inner: &PatternElement,
+                rest: &[PatternElement],
+                input_chars: &[char],
+            ) -> Option<usize> {
+                if let Some(after_one) = try_match_from(pos, &[inner.clone()], input_chars) {
+                    if let Some(end) = match_one_or_more(after_one, inner, rest, input_chars) {
+                        return Some(end);
+                    }
+                    try_match_from(after_one, rest, input_chars)
                 } else {
-                    break;
+                    None
                 }
             }
-            for &p in after_reps.iter().rev() {
-                if let Some(end) = try_match_from(p, rest, input_chars) {
-                    return Some(end);
-                }
-            }
-            None
+            match_one_or_more(pos, inner, rest, input_chars)
         }
         PatternElement::Optional(inner) => {
             if let Some(new_pos) = try_match_from(pos, &[*inner.clone()], input_chars) {
@@ -153,6 +158,13 @@ fn try_match_from(pos: usize, elems: &[PatternElement], input_chars: &[char]) ->
             if pos < input_chars.len()
                 && (input_chars[pos].is_ascii_alphanumeric() || input_chars[pos] == '_')
             {
+                try_match_from(pos + 1, rest, input_chars)
+            } else {
+                None
+            }
+        }
+        PatternElement::Any => {
+            if pos < input_chars.len() {
                 try_match_from(pos + 1, rest, input_chars)
             } else {
                 None
