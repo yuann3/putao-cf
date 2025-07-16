@@ -9,6 +9,7 @@ enum PatternElement {
     Word,
     PosGroup(String),
     NegGroup(String),
+    Optional(Box<PatternElement>),
     OneOrMore(Box<PatternElement>),
 }
 
@@ -69,6 +70,9 @@ fn parse_pattern(pattern: &str) -> (Vec<PatternElement>, bool, bool) {
             if i < chars.len() && chars[i] == '+' {
                 i += 1;
                 elem = PatternElement::OneOrMore(Box::new(elem));
+            } else if i < chars.len() && chars[i] == '?' {
+                i += 1;
+                elem = PatternElement::Optional(Box::new(elem));
             }
             elements.push(elem);
         }
@@ -122,6 +126,14 @@ fn try_match_from(pos: usize, elems: &[PatternElement], input_chars: &[char]) ->
                 }
             }
             None
+        }
+        PatternElement::Optional(inner) => {
+            if let Some(new_pos) = try_match_from(pos, &[*inner.clone()], input_chars) {
+                if let Some(end) = try_match_from(new_pos, rest, input_chars) {
+                    return Some(end);
+                }
+            }
+            try_match_from(pos, rest, input_chars)
         }
         PatternElement::Literal(l) => {
             if pos < input_chars.len() && input_chars[pos] == *l {
