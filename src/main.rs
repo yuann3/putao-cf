@@ -2,12 +2,14 @@ use std::env;
 use std::io;
 use std::process;
 
+#[derive(Clone)]
 enum PatternElement {
     Literal(char),
     Digit,
     Word,
     PosGroup(String),
     NegGroup(String),
+    OneOrMore(Box<PatternElement>),
 }
 
 fn parse_pattern(pattern: &str) -> (Vec<PatternElement>, bool, bool) {
@@ -21,6 +23,7 @@ fn parse_pattern(pattern: &str) -> (Vec<PatternElement>, bool, bool) {
     }
     let mut end_anchored = false;
     while i < chars.len() {
+        let mut base: Option<PatternElement> = None;
         let c = chars[i];
         if c == '\\' {
             i += 1;
@@ -28,11 +31,12 @@ fn parse_pattern(pattern: &str) -> (Vec<PatternElement>, bool, bool) {
                 panic!("Invalid pattern: incomplete escape");
             }
             match chars[i] {
-                '\\' => elements.push(PatternElement::Literal('\\')),
-                'd' => elements.push(PatternElement::Digit),
-                'w' => elements.push(PatternElement::Word),
+                '\\' => base = Some(PatternElement::Literal('\\')),
+                'd' => base = Some(PatternElement::Digit),
+                'w' => base = Some(PatternElement::Word),
                 _ => panic!("Unhandled escape: \\{}", chars[i]),
             }
+            i += 1;
         } else if c == '[' {
             i += 1;
             let mut neg = false;
@@ -48,19 +52,26 @@ fn parse_pattern(pattern: &str) -> (Vec<PatternElement>, bool, bool) {
             if i >= chars.len() || chars[i] != ']' {
                 panic!("Unhandled pattern: unclosed group");
             }
-            if neg {
-                elements.push(PatternElement::NegGroup(inner));
+            i += 1;
+            base = Some(if neg {
+                PatternElement::NegGroup(inner)
             } else {
-                elements.push(PatternElement::PosGroup(inner));
-            }
+                PatternElement::PosGroup(inner)
+            });
+        } else if c == '$' && i + 1 == chars.len() {
+            end_anchored = true;
+            i += 1;
         } else {
-            if c == '$' && i + 1 == chars.len() {
-                end_anchored = true;
-            } else {
-                elements.push(PatternElement::Literal(c));
-            }
+            base = Some(PatternElement::Literal(c));
+            i += 1;
         }
-        i += 1;
+        if let Some(mut elem) = base {
+            if i < chars.len() && chars[i] == '+' {
+                i += 1;
+                elem = PatternElement::OneOrMore(Box::new(elem));
+            }
+            elements.push(elem);
+        }
     }
     (elements, start_anchored, end_anchored)
 }
@@ -68,44 +79,88 @@ fn parse_pattern(pattern: &str) -> (Vec<PatternElement>, bool, bool) {
 fn match_pattern(input_line: &str, pattern: &str) -> bool {
     let (elements, start_anchored, end_anchored) = parse_pattern(pattern);
     let input_chars: Vec<char> = input_line.chars().collect();
-    let pat_len = elements.len();
     let input_len = input_chars.len();
-    let possible_starts = match (start_anchored, end_anchored) {
-        (true, true) => {
-            if input_len == pat_len {
-                vec![0]
-            } else {
-                vec![]
-            }
-        }
-        (true, false) => {
-            if input_len >= pat_len {
-                vec![0]
-            } else {
-                vec![]
-            }
-        }
-        (false, true) => {
-            if input_len >= pat_len {
-                vec![input_len - pat_len]
-            } else {
-                vec![]
-            }
-        }
-        (false, false) => (0..=input_len.saturating_sub(pat_len)).collect(),
+    let possible_starts: Vec<usize> = if start_anchored {
+        vec![0]
+    } else {
+        (0..=input_len).collect()
     };
-    possible_starts.iter().any(|start| {
-        (0..pat_len).all(|j| {
-            let ch = input_chars[start + j];
-            match &elements[j] {
-                PatternElement::Literal(l) => ch == *l,
-                PatternElement::Digit => ch.is_ascii_digit(),
-                PatternElement::Word => ch.is_ascii_alphanumeric() || ch == '_',
-                PatternElement::PosGroup(inner) => inner.contains(ch),
-                PatternElement::NegGroup(inner) => !inner.contains(ch),
+    possible_starts.iter().any(|&start| {
+        if let Some(end) = try_match_from(start, &elements, &input_chars) {
+            if end_anchored {
+                end == input_len
+            } else {
+                true
             }
-        })
+        } else {
+            false
+        }
     })
+}
+
+fn try_match_from(pos: usize, elems: &[PatternElement], input_chars: &[char]) -> Option<usize> {
+    if elems.is_empty() {
+        return Some(pos);
+    }
+    let elem = &elems[0];
+    let rest = &elems[1..];
+    match elem {
+        PatternElement::OneOrMore(inner) => {
+            let mut current = pos;
+            let mut after_reps: Vec<usize> = vec![];
+            loop {
+                if let Some(new_pos) = try_match_from(current, &[*inner.clone()], input_chars) {
+                    current = new_pos;
+                    after_reps.push(current);
+                } else {
+                    break;
+                }
+            }
+            for &p in after_reps.iter().rev() {
+                if let Some(end) = try_match_from(p, rest, input_chars) {
+                    return Some(end);
+                }
+            }
+            None
+        }
+        PatternElement::Literal(l) => {
+            if pos < input_chars.len() && input_chars[pos] == *l {
+                try_match_from(pos + 1, rest, input_chars)
+            } else {
+                None
+            }
+        }
+        PatternElement::Digit => {
+            if pos < input_chars.len() && input_chars[pos].is_ascii_digit() {
+                try_match_from(pos + 1, rest, input_chars)
+            } else {
+                None
+            }
+        }
+        PatternElement::Word => {
+            if pos < input_chars.len()
+                && (input_chars[pos].is_ascii_alphanumeric() || input_chars[pos] == '_')
+            {
+                try_match_from(pos + 1, rest, input_chars)
+            } else {
+                None
+            }
+        }
+        PatternElement::PosGroup(inner) => {
+            if pos < input_chars.len() && inner.contains(input_chars[pos]) {
+                try_match_from(pos + 1, rest, input_chars)
+            } else {
+                None
+            }
+        }
+        PatternElement::NegGroup(inner) => {
+            if pos < input_chars.len() && !inner.contains(input_chars[pos]) {
+                try_match_from(pos + 1, rest, input_chars)
+            } else {
+                None
+            }
+        }
+    }
 }
 
 //  echo <input_text> | cargo run -E <pattern>
