@@ -15,25 +15,17 @@ enum PatternElement {
     Alternation(Vec<Vec<PatternElement>>),
 }
 
-fn parse_pattern(pattern: &str) -> (Vec<PatternElement>, bool, bool) {
+fn parse_elements(chars: &[char], i: &mut usize) -> Vec<PatternElement> {
     let mut elements = Vec::new();
-    let chars: Vec<char> = pattern.chars().collect();
-    let mut i = 0;
-    let mut start_anchored = false;
-    if !chars.is_empty() && chars[0] == '^' {
-        start_anchored = true;
-        i = 1;
-    }
-    let mut end_anchored = false;
-    while i < chars.len() {
-        let mut base: Option<PatternElement> = None;
-        let c = chars[i];
+    while *i < chars.len() {
+        let base: Option<PatternElement>;
+        let c = chars[*i];
         if c == '\\' {
-            i += 1;
-            if i >= chars.len() {
+            *i += 1;
+            if *i >= chars.len() {
                 panic!("Invalid pattern: incomplete escape");
             }
-            match chars[i] {
+            match chars[*i] {
                 '\\' => base = Some(PatternElement::Literal('\\')),
                 'd' => base = Some(PatternElement::Digit),
                 'w' => base = Some(PatternElement::Word),
@@ -47,154 +39,37 @@ fn parse_pattern(pattern: &str) -> (Vec<PatternElement>, bool, bool) {
                 '.' => base = Some(PatternElement::Literal('.')),
                 '+' => base = Some(PatternElement::Literal('+')),
                 '?' => base = Some(PatternElement::Literal('?')),
-                _ => panic!("Unhandled escape: \\{}", chars[i]),
+                _ => panic!("Unhandled escape: \\{}", chars[*i]),
             }
-            i += 1;
+            *i += 1;
         } else if c == '[' {
-            i += 1;
+            *i += 1;
             let mut neg = false;
-            if i < chars.len() && chars[i] == '^' {
+            if *i < chars.len() && chars[*i] == '^' {
                 neg = true;
-                i += 1;
+                *i += 1;
             }
             let mut inner = String::new();
-            while i < chars.len() && chars[i] != ']' {
-                inner.push(chars[i]);
-                i += 1;
+            while *i < chars.len() && chars[*i] != ']' {
+                inner.push(chars[*i]);
+                *i += 1;
             }
-            if i >= chars.len() || chars[i] != ']' {
+            if *i >= chars.len() || chars[*i] != ']' {
                 panic!("Unhandled pattern: unclosed group");
             }
-            i += 1;
+            *i += 1;
             base = Some(if neg {
                 PatternElement::NegGroup(inner)
             } else {
                 PatternElement::PosGroup(inner)
             });
         } else if c == '(' {
-            i += 1;
+            *i += 1;
             let mut inner_str = String::new();
             let mut depth = 0;
-            while i < chars.len() {
-                let ch = chars[i];
-                i += 1;
-                if ch == '(' {
-                    depth += 1;
-                }
-                if ch == ')' {
-                    if depth == 0 {
-                        break;
-                    }
-                    depth -= 1;
-                }
-                inner_str.push(ch);
-            }
-            let branches = parse_alternatives(&inner_str);
-            base = Some(PatternElement::Alternation(branches));
-        } else if c == '$' && i + 1 == chars.len() {
-            end_anchored = true;
-            i += 1;
-        } else {
-            if c == '.' {
-                base = Some(PatternElement::Any);
-            } else {
-                base = Some(PatternElement::Literal(c));
-            }
-            i += 1;
-        }
-        if let Some(mut elem) = base {
-            if i < chars.len() && chars[i] == '+' {
-                i += 1;
-                elem = PatternElement::OneOrMore(Box::new(elem));
-            } else if i < chars.len() && chars[i] == '?' {
-                i += 1;
-                elem = PatternElement::Optional(Box::new(elem));
-            }
-            elements.push(elem);
-        }
-    }
-    (elements, start_anchored, end_anchored)
-}
-
-fn parse_alternatives(pattern: &str) -> Vec<Vec<PatternElement>> {
-    let mut branches = Vec::new();
-    let mut current = String::new();
-    let chars: Vec<char> = pattern.chars().collect();
-    let mut i = 0;
-    let mut depth = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        if depth == 0 && c == '|' {
-            branches.push(parse_subpattern(&current));
-            current = String::new();
-        } else {
-            current.push(c);
-            if c == '(' { depth += 1; }
-            if c == ')' { depth -= 1; }
-        }
-        i += 1;
-    }
-    branches.push(parse_subpattern(&current));
-    branches
-}
-
-fn parse_subpattern(pattern: &str) -> Vec<PatternElement> {
-    let mut elements = Vec::new();
-    let chars: Vec<char> = pattern.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        let mut base: Option<PatternElement> = None;
-        let c = chars[i];
-        if c == '\\' {
-            i += 1;
-            if i >= chars.len() {
-                panic!("Invalid pattern: incomplete escape");
-            }
-            match chars[i] {
-                '\\' => base = Some(PatternElement::Literal('\\')),
-                'd' => base = Some(PatternElement::Digit),
-                'w' => base = Some(PatternElement::Word),
-                '^' => base = Some(PatternElement::Literal('^')),
-                '$' => base = Some(PatternElement::Literal('$')),
-                '(' => base = Some(PatternElement::Literal('(')),
-                ')' => base = Some(PatternElement::Literal(')')),
-                '|' => base = Some(PatternElement::Literal('|')),
-                '[' => base = Some(PatternElement::Literal('[')),
-                ']' => base = Some(PatternElement::Literal(']')),
-                '.' => base = Some(PatternElement::Literal('.')),
-                '+' => base = Some(PatternElement::Literal('+')),
-                '?' => base = Some(PatternElement::Literal('?')),
-                _ => panic!("Unhandled escape: \\{}", chars[i]),
-            }
-            i += 1;
-        } else if c == '[' {
-            i += 1;
-            let mut neg = false;
-            if i < chars.len() && chars[i] == '^' {
-                neg = true;
-                i += 1;
-            }
-            let mut inner = String::new();
-            while i < chars.len() && chars[i] != ']' {
-                inner.push(chars[i]);
-                i += 1;
-            }
-            if i >= chars.len() || chars[i] != ']' {
-                panic!("Unhandled pattern: unclosed group");
-            }
-            i += 1;
-            base = Some(if neg {
-                PatternElement::NegGroup(inner)
-            } else {
-                PatternElement::PosGroup(inner)
-            });
-        } else if c == '(' {
-            i += 1;
-            let mut inner_str = String::new();
-            let mut depth = 0;
-            while i < chars.len() {
-                let ch = chars[i];
-                i += 1;
+            while *i < chars.len() {
+                let ch = chars[*i];
+                *i += 1;
                 if ch == '(' {
                     depth += 1;
                 }
@@ -210,23 +85,67 @@ fn parse_subpattern(pattern: &str) -> Vec<PatternElement> {
             base = Some(PatternElement::Alternation(branches));
         } else if c == '.' {
             base = Some(PatternElement::Any);
-            i += 1;
+            *i += 1;
         } else {
             base = Some(PatternElement::Literal(c));
-            i += 1;
+            *i += 1;
         }
         if let Some(mut elem) = base {
-            if i < chars.len() && chars[i] == '+' {
-                i += 1;
+            if *i < chars.len() && chars[*i] == '+' {
+                *i += 1;
                 elem = PatternElement::OneOrMore(Box::new(elem));
-            } else if i < chars.len() && chars[i] == '?' {
-                i += 1;
+            } else if *i < chars.len() && chars[*i] == '?' {
+                *i += 1;
                 elem = PatternElement::Optional(Box::new(elem));
             }
             elements.push(elem);
         }
     }
     elements
+}
+
+fn parse_pattern(pattern: &str) -> (Vec<PatternElement>, bool, bool) {
+    let mut start_anchored = false;
+    let mut end_anchored = false;
+    let mut pat = pattern;
+    if pat.starts_with('^') {
+        start_anchored = true;
+        pat = &pat[1..];
+    }
+    if pat.ends_with('$') && !pat.ends_with("\\$") {
+        end_anchored = true;
+        pat = &pat[0..pat.len() - 1];
+    }
+    let chars: Vec<char> = pat.chars().collect();
+    let mut i: usize = 0;
+    let elements = parse_elements(&chars, &mut i);
+    (elements, start_anchored, end_anchored)
+}
+
+fn parse_alternatives(pattern: &str) -> Vec<Vec<PatternElement>> {
+    let mut branches = Vec::new();
+    let mut current = String::new();
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut i = 0;
+    let mut depth = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if depth == 0 && c == '|' {
+            let branch_chars: Vec<char> = current.chars().collect();
+            let mut branch_i = 0;
+            branches.push(parse_elements(&branch_chars, &mut branch_i));
+            current = String::new();
+        } else {
+            current.push(c);
+            if c == '(' { depth += 1; }
+            if c == ')' { depth -= 1; }
+        }
+        i += 1;
+    }
+    let branch_chars: Vec<char> = current.chars().collect();
+    let mut branch_i = 0;
+    branches.push(parse_elements(&branch_chars, &mut branch_i));
+    branches
 }
 
 fn match_pattern(input_line: &str, pattern: &str) -> bool {
