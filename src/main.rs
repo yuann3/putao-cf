@@ -12,11 +12,11 @@ enum PatternElement {
     NegGroup(String),
     Optional(Box<PatternElement>),
     OneOrMore(Box<PatternElement>),
-    Capture(Vec<Vec<PatternElement>>),
-    Backref,
+    Capture(usize, Vec<Vec<PatternElement>>),
+    Backref(usize),
 }
 
-fn parse_elements(chars: &[char], i: &mut usize) -> Vec<PatternElement> {
+fn parse_elements(chars: &[char], i: &mut usize, group_id: &mut usize) -> Vec<PatternElement> {
     let mut elements = Vec::new();
     while *i < chars.len() {
         let base: Option<PatternElement>;
@@ -40,7 +40,15 @@ fn parse_elements(chars: &[char], i: &mut usize) -> Vec<PatternElement> {
                 '.' => base = Some(PatternElement::Literal('.')),
                 '+' => base = Some(PatternElement::Literal('+')),
                 '?' => base = Some(PatternElement::Literal('?')),
-                '1' => base = Some(PatternElement::Backref),
+                '1' => base = Some(PatternElement::Backref(1)),
+                '2' => base = Some(PatternElement::Backref(2)),
+                '3' => base = Some(PatternElement::Backref(3)),
+                '4' => base = Some(PatternElement::Backref(4)),
+                '5' => base = Some(PatternElement::Backref(5)),
+                '6' => base = Some(PatternElement::Backref(6)),
+                '7' => base = Some(PatternElement::Backref(7)),
+                '8' => base = Some(PatternElement::Backref(8)),
+                '9' => base = Some(PatternElement::Backref(9)),
                 _ => panic!("Unhandled escape: \\{}", chars[*i]),
             }
             *i += 1;
@@ -67,6 +75,8 @@ fn parse_elements(chars: &[char], i: &mut usize) -> Vec<PatternElement> {
             });
         } else if c == '(' {
             *i += 1;
+            *group_id += 1;
+            let id = *group_id;
             let mut inner_str = String::new();
             let mut depth = 0;
             while *i < chars.len() {
@@ -83,8 +93,8 @@ fn parse_elements(chars: &[char], i: &mut usize) -> Vec<PatternElement> {
                 }
                 inner_str.push(ch);
             }
-            let branches = parse_alternatives(&inner_str);
-            base = Some(PatternElement::Capture(branches));
+            let branches = parse_alternatives(&inner_str, group_id);
+            base = Some(PatternElement::Capture(id, branches));
         } else if c == '.' {
             base = Some(PatternElement::Any);
             *i += 1;
@@ -120,11 +130,12 @@ fn parse_pattern(pattern: &str) -> (Vec<PatternElement>, bool, bool) {
     }
     let chars: Vec<char> = pat.chars().collect();
     let mut i: usize = 0;
-    let elements = parse_elements(&chars, &mut i);
+    let mut group_id: usize = 0;
+    let elements = parse_elements(&chars, &mut i, &mut group_id);
     (elements, start_anchored, end_anchored)
 }
 
-fn parse_alternatives(pattern: &str) -> Vec<Vec<PatternElement>> {
+fn parse_alternatives(pattern: &str, group_id: &mut usize) -> Vec<Vec<PatternElement>> {
     let mut branches = Vec::new();
     let mut current = String::new();
     let chars: Vec<char> = pattern.chars().collect();
@@ -135,7 +146,7 @@ fn parse_alternatives(pattern: &str) -> Vec<Vec<PatternElement>> {
         if depth == 0 && c == '|' {
             let branch_chars: Vec<char> = current.chars().collect();
             let mut branch_i = 0;
-            branches.push(parse_elements(&branch_chars, &mut branch_i));
+            branches.push(parse_elements(&branch_chars, &mut branch_i, group_id));
             current = String::new();
         } else {
             current.push(c);
@@ -150,7 +161,7 @@ fn parse_alternatives(pattern: &str) -> Vec<Vec<PatternElement>> {
     }
     let branch_chars: Vec<char> = current.chars().collect();
     let mut branch_i = 0;
-    branches.push(parse_elements(&branch_chars, &mut branch_i));
+    branches.push(parse_elements(&branch_chars, &mut branch_i, group_id));
     branches
 }
 
@@ -164,7 +175,7 @@ fn match_pattern(input_line: &str, pattern: &str) -> bool {
         (0..=input_len).collect()
     };
     possible_starts.iter().any(|&start| {
-        if let Some((end, _)) = try_match_from(start, &elements, &input_chars, None) {
+        if let Some((end, _)) = try_match_from(start, &elements, &input_chars, Vec::new()) {
             if end_anchored {
                 end == input_len
             } else {
@@ -180,10 +191,10 @@ fn try_match_from(
     pos: usize,
     elems: &[PatternElement],
     input_chars: &[char],
-    capture: Option<String>,
-) -> Option<(usize, Option<String>)> {
+    captures: Vec<Option<String>>,
+) -> Option<(usize, Vec<Option<String>>)> {
     if elems.is_empty() {
-        return Some((pos, capture));
+        return Some((pos, captures));
     }
     let elem = &elems[0];
     let rest = &elems[1..];
@@ -194,18 +205,14 @@ fn try_match_from(
                 inner: &PatternElement,
                 rest: &[PatternElement],
                 input_chars: &[char],
-                capture: Option<String>,
-            ) -> Option<(usize, Option<String>)> {
+                captures: Vec<Option<String>>,
+            ) -> Option<(usize, Vec<Option<String>>)> {
                 if let Some((after_one, cap_after)) =
-                    try_match_from(pos, &[inner.clone()], input_chars, capture)
+                    try_match_from(pos, &[inner.clone()], input_chars, captures)
                 {
-                    if let Some((end, cap_end)) = match_one_or_more(
-                        after_one,
-                        inner,
-                        rest,
-                        input_chars,
-                        cap_after.clone(),
-                    ) {
+                    if let Some((end, cap_end)) =
+                        match_one_or_more(after_one, inner, rest, input_chars, cap_after.clone())
+                    {
                         return Some((end, cap_end));
                     }
                     try_match_from(after_one, rest, input_chars, cap_after)
@@ -213,30 +220,28 @@ fn try_match_from(
                     None
                 }
             }
-            match_one_or_more(pos, inner, rest, input_chars, capture)
+            match_one_or_more(pos, inner, rest, input_chars, captures)
         }
         PatternElement::Optional(inner) => {
             if let Some((new_pos, cap_with)) =
-                try_match_from(pos, &[*inner.clone()], input_chars, capture.clone())
+                try_match_from(pos, &[*inner.clone()], input_chars, captures.clone())
             {
-                if let Some((end, cap_end)) =
-                    try_match_from(new_pos, rest, input_chars, cap_with)
-                {
+                if let Some((end, cap_end)) = try_match_from(new_pos, rest, input_chars, cap_with) {
                     return Some((end, cap_end));
                 }
             }
-            try_match_from(pos, rest, input_chars, capture)
+            try_match_from(pos, rest, input_chars, captures)
         }
         PatternElement::Literal(l) => {
             if pos < input_chars.len() && input_chars[pos] == *l {
-                try_match_from(pos + 1, rest, input_chars, capture)
+                try_match_from(pos + 1, rest, input_chars, captures)
             } else {
                 None
             }
         }
         PatternElement::Digit => {
             if pos < input_chars.len() && input_chars[pos].is_ascii_digit() {
-                try_match_from(pos + 1, rest, input_chars, capture)
+                try_match_from(pos + 1, rest, input_chars, captures)
             } else {
                 None
             }
@@ -245,40 +250,46 @@ fn try_match_from(
             if pos < input_chars.len()
                 && (input_chars[pos].is_ascii_alphanumeric() || input_chars[pos] == '_')
             {
-                try_match_from(pos + 1, rest, input_chars, capture)
+                try_match_from(pos + 1, rest, input_chars, captures)
             } else {
                 None
             }
         }
         PatternElement::Any => {
             if pos < input_chars.len() {
-                try_match_from(pos + 1, rest, input_chars, capture)
+                try_match_from(pos + 1, rest, input_chars, captures)
             } else {
                 None
             }
         }
         PatternElement::PosGroup(inner) => {
             if pos < input_chars.len() && inner.contains(input_chars[pos]) {
-                try_match_from(pos + 1, rest, input_chars, capture)
+                try_match_from(pos + 1, rest, input_chars, captures)
             } else {
                 None
             }
         }
         PatternElement::NegGroup(inner) => {
             if pos < input_chars.len() && !inner.contains(input_chars[pos]) {
-                try_match_from(pos + 1, rest, input_chars, capture)
+                try_match_from(pos + 1, rest, input_chars, captures)
             } else {
                 None
             }
         }
-        PatternElement::Capture(ref branches) => {
+        PatternElement::Capture(id, ref branches) => {
+            let slot = id - 1;
+            let mut new_captures = captures.clone();
+            if new_captures.len() <= slot {
+                new_captures.resize(slot + 1, None);
+            }
             for branch in branches {
-                if let Some((new_pos, _)) =
-                    try_match_from(pos, branch, input_chars, capture.clone())
+                if let Some((new_pos, mut inner_captures)) =
+                    try_match_from(pos, branch, input_chars, new_captures.clone())
                 {
                     let matched = input_chars[pos..new_pos].iter().collect::<String>();
+                    inner_captures[slot] = Some(matched);
                     if let Some((end, cap_end)) =
-                        try_match_from(new_pos, rest, input_chars, Some(matched))
+                        try_match_from(new_pos, rest, input_chars, inner_captures)
                     {
                         return Some((end, cap_end));
                     }
@@ -286,13 +297,12 @@ fn try_match_from(
             }
             None
         }
-        PatternElement::Backref => {
-            if let Some(ref s) = capture {
+        PatternElement::Backref(n) => {
+            if let Some(Some(ref s)) = captures.get(n - 1) {
                 let s_chars: Vec<char> = s.chars().collect();
                 let len = s_chars.len();
-                if pos + len <= input_chars.len() && input_chars[pos..pos + len] == s_chars[..]
-                {
-                    try_match_from(pos + len, rest, input_chars, capture)
+                if pos + len <= input_chars.len() && input_chars[pos..pos + len] == s_chars[..] {
+                    try_match_from(pos + len, rest, input_chars, captures)
                 } else {
                     None
                 }
