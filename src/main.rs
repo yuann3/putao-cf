@@ -1,341 +1,223 @@
-use std::env;
-use std::io;
-use std::process;
+use anyhow::{bail, Result};
+use std::{env, io, process};
 
 #[derive(Clone)]
-enum PatternElement {
-    Literal(char),
+enum Node {
+    Lit(char),
     Digit,
     Word,
     Any,
-    PosGroup(String),
-    NegGroup(String),
-    Optional(Box<PatternElement>),
-    OneOrMore(Box<PatternElement>),
-    Capture(usize, Vec<Vec<PatternElement>>),
-    CaptureEnd(usize, usize),
-    Backref(usize),
+    Pos(String),
+    Neg(String),
+    Opt(Box<Node>),
+    Plus(Box<Node>),
+    Cap(usize, Vec<Vec<Node>>),
+    CapEnd(usize, usize),
+    Ref(usize),
 }
 
-fn parse_elements(chars: &[char], i: &mut usize, group_id: &mut usize) -> Vec<PatternElement> {
-    let mut elements = Vec::new();
-    while *i < chars.len() {
-        let base: Option<PatternElement>;
-        let c = chars[*i];
-        if c == '\\' {
-            *i += 1;
-            if *i >= chars.len() {
-                panic!("Invalid pattern: incomplete escape");
-            }
-            match chars[*i] {
-                '\\' => base = Some(PatternElement::Literal('\\')),
-                'd' => base = Some(PatternElement::Digit),
-                'w' => base = Some(PatternElement::Word),
-                '^' => base = Some(PatternElement::Literal('^')),
-                '$' => base = Some(PatternElement::Literal('$')),
-                '(' => base = Some(PatternElement::Literal('(')),
-                ')' => base = Some(PatternElement::Literal(')')),
-                '|' => base = Some(PatternElement::Literal('|')),
-                '[' => base = Some(PatternElement::Literal('[')),
-                ']' => base = Some(PatternElement::Literal(']')),
-                '.' => base = Some(PatternElement::Literal('.')),
-                '+' => base = Some(PatternElement::Literal('+')),
-                '?' => base = Some(PatternElement::Literal('?')),
-                '1' => base = Some(PatternElement::Backref(1)),
-                '2' => base = Some(PatternElement::Backref(2)),
-                '3' => base = Some(PatternElement::Backref(3)),
-                '4' => base = Some(PatternElement::Backref(4)),
-                '5' => base = Some(PatternElement::Backref(5)),
-                '6' => base = Some(PatternElement::Backref(6)),
-                '7' => base = Some(PatternElement::Backref(7)),
-                '8' => base = Some(PatternElement::Backref(8)),
-                '9' => base = Some(PatternElement::Backref(9)),
-                _ => panic!("Unhandled escape: \\{}", chars[*i]),
-            }
-            *i += 1;
-        } else if c == '[' {
-            *i += 1;
-            let mut neg = false;
-            if *i < chars.len() && chars[*i] == '^' {
-                neg = true;
-                *i += 1;
-            }
-            let mut inner = String::new();
-            while *i < chars.len() && chars[*i] != ']' {
-                inner.push(chars[*i]);
-                *i += 1;
-            }
-            if *i >= chars.len() || chars[*i] != ']' {
-                panic!("Unhandled pattern: unclosed group");
-            }
-            *i += 1;
-            base = Some(if neg {
-                PatternElement::NegGroup(inner)
-            } else {
-                PatternElement::PosGroup(inner)
-            });
-        } else if c == '(' {
-            *i += 1;
-            *group_id += 1;
-            let id = *group_id;
-            let mut inner_str = String::new();
-            let mut depth = 0;
-            while *i < chars.len() {
-                let ch = chars[*i];
-                *i += 1;
-                if ch == '(' {
-                    depth += 1;
-                }
-                if ch == ')' {
-                    if depth == 0 {
-                        break;
-                    }
-                    depth -= 1;
-                }
-                inner_str.push(ch);
-            }
-            let branches = parse_alternatives(&inner_str, group_id);
-            base = Some(PatternElement::Capture(id, branches));
-        } else if c == '.' {
-            base = Some(PatternElement::Any);
-            *i += 1;
-        } else {
-            base = Some(PatternElement::Literal(c));
-            *i += 1;
-        }
-        if let Some(mut elem) = base {
-            if *i < chars.len() && chars[*i] == '+' {
-                *i += 1;
-                elem = PatternElement::OneOrMore(Box::new(elem));
-            } else if *i < chars.len() && chars[*i] == '?' {
-                *i += 1;
-                elem = PatternElement::Optional(Box::new(elem));
-            }
-            elements.push(elem);
-        }
-    }
-    elements
-}
-
-fn parse_pattern(pattern: &str) -> (Vec<PatternElement>, bool, bool) {
-    let mut start_anchored = false;
-    let mut end_anchored = false;
+/// Parses a pattern into AST nodes and anchor flags.
+fn parse(pattern: &str) -> Result<(Vec<Node>, bool, bool)> {
+    let (mut start, mut end) = (false, false);
     let mut pat = pattern;
     if pat.starts_with('^') {
-        start_anchored = true;
+        start = true;
         pat = &pat[1..];
     }
     if pat.ends_with('$') && !pat.ends_with("\\$") {
-        end_anchored = true;
-        pat = &pat[0..pat.len() - 1];
+        end = true;
+        pat = &pat[..pat.len() - 1];
     }
-    let chars: Vec<char> = pat.chars().collect();
-    let mut i: usize = 0;
-    let mut group_id: usize = 0;
-    let elements = parse_elements(&chars, &mut i, &mut group_id);
-    (elements, start_anchored, end_anchored)
+    let cs: Vec<char> = pat.chars().collect();
+    let mut i = 0usize;
+    let mut gid = 0usize;
+    Ok((elems(&cs, &mut i, &mut gid)?, start, end))
 }
 
-fn parse_alternatives(pattern: &str, group_id: &mut usize) -> Vec<Vec<PatternElement>> {
-    let mut branches = Vec::new();
-    let mut current = String::new();
-    let chars: Vec<char> = pattern.chars().collect();
-    let mut i = 0;
-    let mut depth = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        if depth == 0 && c == '|' {
-            let branch_chars: Vec<char> = current.chars().collect();
-            let mut branch_i = 0;
-            branches.push(parse_elements(&branch_chars, &mut branch_i, group_id));
-            current = String::new();
+/// Parses a sequence of nodes until end or ')'.
+fn elems(cs: &[char], i: &mut usize, gid: &mut usize) -> Result<Vec<Node>> {
+    let mut out = Vec::new();
+    while *i < cs.len() {
+        let c = cs[*i];
+        let base = if c == '\\' {
+            *i += 1;
+            if *i >= cs.len() { bail!("invalid escape"); }
+            let e = cs[*i];
+            *i += 1;
+            match e {
+                'd' => Some(Node::Digit),
+                'w' => Some(Node::Word),
+                '1'..='9' => Some(Node::Ref((e as u8 - b'0') as usize)),
+                _ => Some(Node::Lit(e)),
+            }
+        } else if c == '[' {
+            *i += 1;
+            let neg = *i < cs.len() && cs[*i] == '^';
+            if neg { *i += 1; }
+            let mut s = String::new();
+            while *i < cs.len() && cs[*i] != ']' { s.push(cs[*i]); *i += 1; }
+            if *i >= cs.len() || cs[*i] != ']' { bail!("unclosed class"); }
+            *i += 1;
+            Some(if neg { Node::Neg(s) } else { Node::Pos(s) })
+        } else if c == '(' {
+            *i += 1;
+            *gid += 1;
+            let id = *gid;
+            let mut buf = String::new();
+            let mut d = 0;
+            while *i < cs.len() {
+                let ch = cs[*i];
+                *i += 1;
+                if ch == '(' { d += 1; }
+                if ch == ')' { if d == 0 { break; } d -= 1; }
+                buf.push(ch);
+            }
+            Some(Node::Cap(id, branches(&buf, gid)?))
+        } else if c == ')' { break } else if c == '.' { *i += 1; Some(Node::Any) } else {
+            *i += 1; Some(Node::Lit(c))
+        };
+        if let Some(mut n) = base {
+            if *i < cs.len() && cs[*i] == '+' { *i += 1; n = Node::Plus(Box::new(n)); }
+            else if *i < cs.len() && cs[*i] == '?' { *i += 1; n = Node::Opt(Box::new(n)); }
+            out.push(n);
+        }
+    }
+    Ok(out)
+}
+
+/// Parses top-level alternation branches within a group.
+fn branches(s: &str, gid: &mut usize) -> Result<Vec<Vec<Node>>> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let cs: Vec<char> = s.chars().collect();
+    let mut i = 0usize;
+    let mut d = 0i32;
+    while i < cs.len() {
+        let c = cs[i];
+        if d == 0 && c == '|' {
+            let v: Vec<char> = cur.chars().collect();
+            let mut j = 0usize;
+            out.push(elems(&v, &mut j, gid)?);
+            cur.clear();
         } else {
-            current.push(c);
-            if c == '(' {
-                depth += 1;
-            }
-            if c == ')' {
-                depth -= 1;
-            }
+            if c == '(' { d += 1; }
+            if c == ')' { d -= 1; }
+            cur.push(c);
         }
         i += 1;
     }
-    let branch_chars: Vec<char> = current.chars().collect();
-    let mut branch_i = 0;
-    branches.push(parse_elements(&branch_chars, &mut branch_i, group_id));
-    branches
+    let v: Vec<char> = cur.chars().collect();
+    let mut j = 0usize;
+    out.push(elems(&v, &mut j, gid)?);
+    Ok(out)
 }
 
-fn match_pattern(input_line: &str, pattern: &str) -> bool {
-    let (elements, start_anchored, end_anchored) = parse_pattern(pattern);
-    let input_chars: Vec<char> = input_line.chars().collect();
-    let input_len = input_chars.len();
-    let possible_starts: Vec<usize> = if start_anchored {
-        vec![0]
-    } else {
-        (0..=input_len).collect()
-    };
-    possible_starts.iter().any(|&start| {
-        if let Some((end, _)) = try_match_from(start, &elements, &input_chars, Vec::new()) {
-            if end_anchored {
-                end == input_len
-            } else {
-                true
-            }
-        } else {
-            false
-        }
-    })
+/// Attempts to match the pattern against the input string.
+fn is_match(input: &str, pat: &str) -> Result<bool> {
+    let (nodes, start, end) = parse(pat)?;
+    let cs: Vec<char> = input.chars().collect();
+    let n = cs.len();
+    let starts: Vec<usize> = if start { vec![0] } else { (0..=n).collect() };
+    Ok(starts
+        .iter()
+        .any(|&st| match_from(st, &nodes, &cs, Vec::new())
+        .map(|(e, _)| if end { e == n } else { true })
+        .unwrap_or(false)))
 }
 
-fn try_match_from(
+/// Backtracking matcher for a sequence of nodes from a position.
+fn match_from(
     pos: usize,
-    elems: &[PatternElement],
-    input_chars: &[char],
-    captures: Vec<Option<String>>,
+    nodes: &[Node],
+    cs: &[char],
+    caps: Vec<Option<String>>,
 ) -> Option<(usize, Vec<Option<String>>)> {
-    if elems.is_empty() {
-        return Some((pos, captures));
-    }
-    let elem = &elems[0];
-    let rest = &elems[1..];
-    match elem {
-        PatternElement::OneOrMore(ref inner) => {
-            fn match_one_or_more(
+    if nodes.is_empty() { return Some((pos, caps)); }
+    let head = &nodes[0];
+    let tail = &nodes[1..];
+    match head {
+        Node::Plus(inner) => {
+            fn more(
                 pos: usize,
-                inner: &PatternElement,
-                rest: &[PatternElement],
-                input_chars: &[char],
-                captures: Vec<Option<String>>,
+                inner: &Node,
+                rest: &[Node],
+                cs: &[char],
+                caps: Vec<Option<String>>,
             ) -> Option<(usize, Vec<Option<String>>)> {
-                if let Some((after_one, cap_after)) =
-                    try_match_from(pos, &[inner.clone()], input_chars, captures)
-                {
-                    if let Some((end, cap_end)) =
-                        match_one_or_more(after_one, inner, rest, input_chars, cap_after.clone())
-                    {
-                        return Some((end, cap_end));
-                    }
-                    try_match_from(after_one, rest, input_chars, cap_after)
-                } else {
-                    None
-                }
+                if let Some((p1, c1)) = match_from(pos, &[inner.clone()], cs, caps) {
+                    if let Some((e, c2)) = more(p1, inner, rest, cs, c1.clone()) { return Some((e, c2)); }
+                    match_from(p1, rest, cs, c1)
+                } else { None }
             }
-            match_one_or_more(pos, inner, rest, input_chars, captures)
+            more(pos, &*inner, tail, cs, caps)
         }
-        PatternElement::Optional(inner) => {
-            if let Some((new_pos, cap_with)) =
-                try_match_from(pos, &[*inner.clone()], input_chars, captures.clone())
-            {
-                if let Some((end, cap_end)) = try_match_from(new_pos, rest, input_chars, cap_with) {
-                    return Some((end, cap_end));
-                }
+        Node::Opt(inner) => {
+            if let Some((p1, c1)) = match_from(pos, &[(*inner.clone())], cs, caps.clone()) {
+                if let Some((e, c2)) = match_from(p1, tail, cs, c1) { return Some((e, c2)); }
             }
-            try_match_from(pos, rest, input_chars, captures)
+            match_from(pos, tail, cs, caps)
         }
-        PatternElement::Literal(l) => {
-            if pos < input_chars.len() && input_chars[pos] == *l {
-                try_match_from(pos + 1, rest, input_chars, captures)
-            } else {
-                None
-            }
+        Node::Lit(ch) => {
+            if pos < cs.len() && cs[pos] == *ch { match_from(pos + 1, tail, cs, caps) } else { None }
         }
-        PatternElement::Digit => {
-            if pos < input_chars.len() && input_chars[pos].is_ascii_digit() {
-                try_match_from(pos + 1, rest, input_chars, captures)
-            } else {
-                None
-            }
+        Node::Digit => {
+            if pos < cs.len() && cs[pos].is_ascii_digit() { match_from(pos + 1, tail, cs, caps) } else { None }
         }
-        PatternElement::Word => {
-            if pos < input_chars.len()
-                && (input_chars[pos].is_ascii_alphanumeric() || input_chars[pos] == '_')
-            {
-                try_match_from(pos + 1, rest, input_chars, captures)
-            } else {
-                None
-            }
+        Node::Word => {
+            if pos < cs.len() && (cs[pos].is_ascii_alphanumeric() || cs[pos] == '_') { match_from(pos + 1, tail, cs, caps) } else { None }
         }
-        PatternElement::Any => {
-            if pos < input_chars.len() {
-                try_match_from(pos + 1, rest, input_chars, captures)
-            } else {
-                None
-            }
+        Node::Any => {
+            if pos < cs.len() { match_from(pos + 1, tail, cs, caps) } else { None }
         }
-        PatternElement::PosGroup(inner) => {
-            if pos < input_chars.len() && inner.contains(input_chars[pos]) {
-                try_match_from(pos + 1, rest, input_chars, captures)
-            } else {
-                None
-            }
+        Node::Pos(s) => {
+            if pos < cs.len() && s.contains(cs[pos]) { match_from(pos + 1, tail, cs, caps) } else { None }
         }
-        PatternElement::NegGroup(inner) => {
-            if pos < input_chars.len() && !inner.contains(input_chars[pos]) {
-                try_match_from(pos + 1, rest, input_chars, captures)
-            } else {
-                None
-            }
+        Node::Neg(s) => {
+            if pos < cs.len() && !s.contains(cs[pos]) { match_from(pos + 1, tail, cs, caps) } else { None }
         }
-        PatternElement::Capture(id, ref branches) => {
+        Node::Cap(id, brs) => {
             let slot = id - 1;
-            for branch in branches {
-                let mut combined: Vec<PatternElement> = branch.clone();
-                combined.push(PatternElement::CaptureEnd(slot, pos));
-                combined.extend_from_slice(rest);
-                if let Some((end, caps)) =
-                    try_match_from(pos, &combined, input_chars, captures.clone())
-                {
-                    return Some((end, caps));
-                }
+            for b in brs {
+                let mut seq = b.clone();
+                seq.push(Node::CapEnd(slot, pos));
+                seq.extend_from_slice(tail);
+                if let Some((e, c)) = match_from(pos, &seq, cs, caps.clone()) { return Some((e, c)); }
             }
             None
         }
-        PatternElement::CaptureEnd(slot, start) => {
-            let mut new_captures = captures.clone();
-            if new_captures.len() <= *slot {
-                new_captures.resize(*slot + 1, None);
-            }
-            let matched = input_chars[*start..pos].iter().collect::<String>();
-            new_captures[*slot] = Some(matched);
-            try_match_from(pos, rest, input_chars, new_captures)
+        Node::CapEnd(slot, start) => {
+            let mut nc = caps.clone();
+            if nc.len() <= *slot { nc.resize(*slot + 1, None); }
+            let s: String = cs[*start..pos].iter().collect();
+            nc[*slot] = Some(s);
+            match_from(pos, tail, cs, nc)
         }
-        PatternElement::Backref(n) => {
-            if let Some(Some(ref s)) = captures.get(n - 1) {
-                let s_chars: Vec<char> = s.chars().collect();
-                let len = s_chars.len();
-                if pos + len <= input_chars.len() && input_chars[pos..pos + len] == s_chars[..] {
-                    try_match_from(pos + len, rest, input_chars, captures)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+        Node::Ref(n) => {
+            if let Some(Some(s)) = caps.get(n - 1) {
+                let rs: Vec<char> = s.chars().collect();
+                let len = rs.len();
+                if pos + len <= cs.len() && cs[pos..pos + len] == rs[..] { match_from(pos + len, tail, cs, caps) } else { None }
+            } else { None }
         }
     }
 }
 
+/// CLI entrypoint compatible with the runner contract.
 fn main() {
-    eprintln!("[Putao LOG] Start");
-
-    if env::args().nth(1).unwrap() != "-E" {
-        println!("Expected first argument to be '-E'");
-        process::exit(1);
+    match cli() {
+        Ok(code) => process::exit(code),
+        Err(e) => { eprintln!("{}", e); process::exit(1); }
     }
+}
 
-    let pattern = env::args().nth(2).unwrap();
-    let mut input_line = String::new();
-
-    io::stdin().read_line(&mut input_line).unwrap();
-
-    if input_line.ends_with('\n') {
-        input_line.pop();
-    }
-
-    if match_pattern(&input_line, &pattern) {
-        process::exit(0)
-    } else {
-        process::exit(1)
-    }
+/// Parses args, reads stdin, runs match, and returns an exit code.
+fn cli() -> Result<i32> {
+    let arg1 = env::args().nth(1).unwrap_or_default();
+    if arg1 != "-E" { bail!("Expected first argument to be '-E'"); }
+    let pattern = env::args().nth(2).unwrap_or_default();
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+    if line.ends_with('\n') { line.pop(); }
+    let m = is_match(&line, &pattern)?;
+    Ok(if m { 0 } else { 1 })
 }
