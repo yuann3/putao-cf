@@ -13,6 +13,7 @@ enum PatternElement {
     Optional(Box<PatternElement>),
     OneOrMore(Box<PatternElement>),
     Capture(usize, Vec<Vec<PatternElement>>),
+    CaptureEnd(usize, usize),
     Backref(usize),
 }
 
@@ -278,24 +279,26 @@ fn try_match_from(
         }
         PatternElement::Capture(id, ref branches) => {
             let slot = id - 1;
-            let mut new_captures = captures.clone();
-            if new_captures.len() <= slot {
-                new_captures.resize(slot + 1, None);
-            }
             for branch in branches {
-                if let Some((new_pos, mut inner_captures)) =
-                    try_match_from(pos, branch, input_chars, new_captures.clone())
+                let mut combined: Vec<PatternElement> = branch.clone();
+                combined.push(PatternElement::CaptureEnd(slot, pos));
+                combined.extend_from_slice(rest);
+                if let Some((end, caps)) =
+                    try_match_from(pos, &combined, input_chars, captures.clone())
                 {
-                    let matched = input_chars[pos..new_pos].iter().collect::<String>();
-                    inner_captures[slot] = Some(matched);
-                    if let Some((end, cap_end)) =
-                        try_match_from(new_pos, rest, input_chars, inner_captures)
-                    {
-                        return Some((end, cap_end));
-                    }
+                    return Some((end, caps));
                 }
             }
             None
+        }
+        PatternElement::CaptureEnd(slot, start) => {
+            let mut new_captures = captures.clone();
+            if new_captures.len() <= *slot {
+                new_captures.resize(*slot + 1, None);
+            }
+            let matched = input_chars[*start..pos].iter().collect::<String>();
+            new_captures[*slot] = Some(matched);
+            try_match_from(pos, rest, input_chars, new_captures)
         }
         PatternElement::Backref(n) => {
             if let Some(Some(ref s)) = captures.get(n - 1) {
@@ -313,7 +316,6 @@ fn try_match_from(
     }
 }
 
-//  echo <input_text> | cargo run -E <pattern>
 fn main() {
     eprintln!("[Putao LOG] Start");
 
