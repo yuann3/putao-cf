@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use std::{env, io, process};
+use std::{env, fs, io, process};
 
 #[derive(Clone)]
 enum Node {
@@ -41,7 +41,9 @@ fn elems(cs: &[char], i: &mut usize, gid: &mut usize) -> Result<Vec<Node>> {
         let c = cs[*i];
         let base = if c == '\\' {
             *i += 1;
-            if *i >= cs.len() { bail!("invalid escape"); }
+            if *i >= cs.len() {
+                bail!("invalid escape");
+            }
             let e = cs[*i];
             *i += 1;
             match e {
@@ -53,10 +55,17 @@ fn elems(cs: &[char], i: &mut usize, gid: &mut usize) -> Result<Vec<Node>> {
         } else if c == '[' {
             *i += 1;
             let neg = *i < cs.len() && cs[*i] == '^';
-            if neg { *i += 1; }
+            if neg {
+                *i += 1;
+            }
             let mut s = String::new();
-            while *i < cs.len() && cs[*i] != ']' { s.push(cs[*i]); *i += 1; }
-            if *i >= cs.len() || cs[*i] != ']' { bail!("unclosed class"); }
+            while *i < cs.len() && cs[*i] != ']' {
+                s.push(cs[*i]);
+                *i += 1;
+            }
+            if *i >= cs.len() || cs[*i] != ']' {
+                bail!("unclosed class");
+            }
             *i += 1;
             Some(if neg { Node::Neg(s) } else { Node::Pos(s) })
         } else if c == '(' {
@@ -68,17 +77,35 @@ fn elems(cs: &[char], i: &mut usize, gid: &mut usize) -> Result<Vec<Node>> {
             while *i < cs.len() {
                 let ch = cs[*i];
                 *i += 1;
-                if ch == '(' { d += 1; }
-                if ch == ')' { if d == 0 { break; } d -= 1; }
+                if ch == '(' {
+                    d += 1;
+                }
+                if ch == ')' {
+                    if d == 0 {
+                        break;
+                    }
+                    d -= 1;
+                }
                 buf.push(ch);
             }
             Some(Node::Cap(id, branches(&buf, gid)?))
-        } else if c == ')' { break } else if c == '.' { *i += 1; Some(Node::Any) } else {
-            *i += 1; Some(Node::Lit(c))
+        } else if c == ')' {
+            break;
+        } else if c == '.' {
+            *i += 1;
+            Some(Node::Any)
+        } else {
+            *i += 1;
+            Some(Node::Lit(c))
         };
         if let Some(mut n) = base {
-            if *i < cs.len() && cs[*i] == '+' { *i += 1; n = Node::Plus(Box::new(n)); }
-            else if *i < cs.len() && cs[*i] == '?' { *i += 1; n = Node::Opt(Box::new(n)); }
+            if *i < cs.len() && cs[*i] == '+' {
+                *i += 1;
+                n = Node::Plus(Box::new(n));
+            } else if *i < cs.len() && cs[*i] == '?' {
+                *i += 1;
+                n = Node::Opt(Box::new(n));
+            }
             out.push(n);
         }
     }
@@ -100,8 +127,12 @@ fn branches(s: &str, gid: &mut usize) -> Result<Vec<Vec<Node>>> {
             out.push(elems(&v, &mut j, gid)?);
             cur.clear();
         } else {
-            if c == '(' { d += 1; }
-            if c == ')' { d -= 1; }
+            if c == '(' {
+                d += 1;
+            }
+            if c == ')' {
+                d -= 1;
+            }
             cur.push(c);
         }
         i += 1;
@@ -118,11 +149,11 @@ fn is_match(input: &str, pat: &str) -> Result<bool> {
     let cs: Vec<char> = input.chars().collect();
     let n = cs.len();
     let starts: Vec<usize> = if start { vec![0] } else { (0..=n).collect() };
-    Ok(starts
-        .iter()
-        .any(|&st| match_from(st, &nodes, &cs, Vec::new())
-        .map(|(e, _)| if end { e == n } else { true })
-        .unwrap_or(false)))
+    Ok(starts.iter().any(|&st| {
+        match_from(st, &nodes, &cs, Vec::new())
+            .map(|(e, _)| if end { e == n } else { true })
+            .unwrap_or(false)
+    }))
 }
 
 /// Backtracking matcher for a sequence of nodes from a position.
@@ -132,7 +163,9 @@ fn match_from(
     cs: &[char],
     caps: Vec<Option<String>>,
 ) -> Option<(usize, Vec<Option<String>>)> {
-    if nodes.is_empty() { return Some((pos, caps)); }
+    if nodes.is_empty() {
+        return Some((pos, caps));
+    }
     let head = &nodes[0];
     let tail = &nodes[1..];
     match head {
@@ -145,35 +178,65 @@ fn match_from(
                 caps: Vec<Option<String>>,
             ) -> Option<(usize, Vec<Option<String>>)> {
                 if let Some((p1, c1)) = match_from(pos, &[inner.clone()], cs, caps) {
-                    if let Some((e, c2)) = more(p1, inner, rest, cs, c1.clone()) { return Some((e, c2)); }
+                    if let Some((e, c2)) = more(p1, inner, rest, cs, c1.clone()) {
+                        return Some((e, c2));
+                    }
                     match_from(p1, rest, cs, c1)
-                } else { None }
+                } else {
+                    None
+                }
             }
             more(pos, &*inner, tail, cs, caps)
         }
         Node::Opt(inner) => {
             if let Some((p1, c1)) = match_from(pos, &[(*inner.clone())], cs, caps.clone()) {
-                if let Some((e, c2)) = match_from(p1, tail, cs, c1) { return Some((e, c2)); }
+                if let Some((e, c2)) = match_from(p1, tail, cs, c1) {
+                    return Some((e, c2));
+                }
             }
             match_from(pos, tail, cs, caps)
         }
         Node::Lit(ch) => {
-            if pos < cs.len() && cs[pos] == *ch { match_from(pos + 1, tail, cs, caps) } else { None }
+            if pos < cs.len() && cs[pos] == *ch {
+                match_from(pos + 1, tail, cs, caps)
+            } else {
+                None
+            }
         }
         Node::Digit => {
-            if pos < cs.len() && cs[pos].is_ascii_digit() { match_from(pos + 1, tail, cs, caps) } else { None }
+            if pos < cs.len() && cs[pos].is_ascii_digit() {
+                match_from(pos + 1, tail, cs, caps)
+            } else {
+                None
+            }
         }
         Node::Word => {
-            if pos < cs.len() && (cs[pos].is_ascii_alphanumeric() || cs[pos] == '_') { match_from(pos + 1, tail, cs, caps) } else { None }
+            if pos < cs.len() && (cs[pos].is_ascii_alphanumeric() || cs[pos] == '_') {
+                match_from(pos + 1, tail, cs, caps)
+            } else {
+                None
+            }
         }
         Node::Any => {
-            if pos < cs.len() { match_from(pos + 1, tail, cs, caps) } else { None }
+            if pos < cs.len() {
+                match_from(pos + 1, tail, cs, caps)
+            } else {
+                None
+            }
         }
         Node::Pos(s) => {
-            if pos < cs.len() && s.contains(cs[pos]) { match_from(pos + 1, tail, cs, caps) } else { None }
+            if pos < cs.len() && s.contains(cs[pos]) {
+                match_from(pos + 1, tail, cs, caps)
+            } else {
+                None
+            }
         }
         Node::Neg(s) => {
-            if pos < cs.len() && !s.contains(cs[pos]) { match_from(pos + 1, tail, cs, caps) } else { None }
+            if pos < cs.len() && !s.contains(cs[pos]) {
+                match_from(pos + 1, tail, cs, caps)
+            } else {
+                None
+            }
         }
         Node::Cap(id, brs) => {
             let slot = id - 1;
@@ -181,13 +244,17 @@ fn match_from(
                 let mut seq = b.clone();
                 seq.push(Node::CapEnd(slot, pos));
                 seq.extend_from_slice(tail);
-                if let Some((e, c)) = match_from(pos, &seq, cs, caps.clone()) { return Some((e, c)); }
+                if let Some((e, c)) = match_from(pos, &seq, cs, caps.clone()) {
+                    return Some((e, c));
+                }
             }
             None
         }
         Node::CapEnd(slot, start) => {
             let mut nc = caps.clone();
-            if nc.len() <= *slot { nc.resize(*slot + 1, None); }
+            if nc.len() <= *slot {
+                nc.resize(*slot + 1, None);
+            }
             let s: String = cs[*start..pos].iter().collect();
             nc[*slot] = Some(s);
             match_from(pos, tail, cs, nc)
@@ -196,8 +263,14 @@ fn match_from(
             if let Some(Some(s)) = caps.get(n - 1) {
                 let rs: Vec<char> = s.chars().collect();
                 let len = rs.len();
-                if pos + len <= cs.len() && cs[pos..pos + len] == rs[..] { match_from(pos + len, tail, cs, caps) } else { None }
-            } else { None }
+                if pos + len <= cs.len() && cs[pos..pos + len] == rs[..] {
+                    match_from(pos + len, tail, cs, caps)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         }
     }
 }
@@ -206,18 +279,40 @@ fn match_from(
 fn main() {
     match cli() {
         Ok(code) => process::exit(code),
-        Err(e) => { eprintln!("{}", e); process::exit(1); }
+        Err(e) => {
+            eprintln!("{}", e);
+            process::exit(1);
+        }
     }
 }
 
 /// Parses args, reads stdin, runs match, and returns an exit code.
 fn cli() -> Result<i32> {
-    let arg1 = env::args().nth(1).unwrap_or_default();
-    if arg1 != "-E" { bail!("Expected first argument to be '-E'"); }
-    let pattern = env::args().nth(2).unwrap_or_default();
-    let mut line = String::new();
-    io::stdin().read_line(&mut line)?;
-    if line.ends_with('\n') { line.pop(); }
-    let m = is_match(&line, &pattern)?;
-    Ok(if m { 0 } else { 1 })
+    let mut args = env::args();
+    args.next();
+    let arg1 = args.next().unwrap_or_default();
+    if arg1 != "-E" {
+        bail!("Expected first argument to be '-E'");
+    }
+    let pattern = args.next().unwrap_or_default();
+    if let Some(file) = args.next() {
+        let content = fs::read_to_string(&file)?;
+        let line_no_nl = content.trim_end_matches(|c| c == '\n' || c == '\r');
+        let m = is_match(line_no_nl, &pattern)?;
+        if m {
+            print!("{}", content);
+        }
+        Ok(if m {0} else {1})
+    } else {
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        if line.ends_with('\n') {
+            line.pop();
+            if line.ends_with('\r') {
+                line.pop();
+            }
+        }
+        let m = is_match(&line, &pattern)?;
+        Ok(if m {0} else {1})
+    }
 }
