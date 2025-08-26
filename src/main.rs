@@ -295,7 +295,23 @@ fn cli() -> Result<i32> {
         bail!("Expected first argument to be '-E'");
     }
     let pattern = args.next().unwrap_or_default();
-    if let Some(file) = args.next() {
+    let files: Vec<String> = args.collect();
+
+    if files.is_empty() {
+        // stdin
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        if line.ends_with('\n') {
+            line.pop();
+            if line.ends_with('\r') {
+                line.pop();
+            }
+        }
+        let m = is_match(&line, &pattern)?;
+        Ok(if m { 0 } else { 1 })
+    } else if files.len() == 1 {
+        // single file: preserve original behavior (no prefix)
+        let file = &files[0];
         let content = fs::read_to_string(&file)?;
         let mut any = false;
         let mut consumed = 0usize;
@@ -317,15 +333,28 @@ fn cli() -> Result<i32> {
         }
         Ok(if any { 0 } else { 1 })
     } else {
-        let mut line = String::new();
-        io::stdin().read_line(&mut line)?;
-        if line.ends_with('\n') {
-            line.pop();
-            if line.ends_with('\r') {
-                line.pop();
+        // multiple files: prefix matches with "<filename>:"
+        let mut any = false;
+        for file in &files {
+            let content = fs::read_to_string(&file)?;
+            let mut consumed = 0usize;
+            for seg in content.split_inclusive('\n') {
+                let ln = seg.trim_end_matches(|c| c == '\n' || c == '\r');
+                if is_match(ln, &pattern)? {
+                    print!("{}:{}", file, seg);
+                    any = true;
+                }
+                consumed += seg.len();
+            }
+            if consumed < content.len() {
+                let last = &content[consumed..];
+                let ln = last.trim_end_matches('\r');
+                if is_match(ln, &pattern)? {
+                    print!("{}:{}", file, last);
+                    any = true;
+                }
             }
         }
-        let m = is_match(&line, &pattern)?;
-        Ok(if m { 0 } else { 1 })
+        Ok(if any { 0 } else { 1 })
     }
 }
