@@ -156,6 +156,38 @@ fn is_match(input: &str, pat: &str) -> Result<bool> {
     }))
 }
 
+/// Prints amtching lines from content, preserving original line
+/// ending and using and optional prefix
+fn grep_content(content: &str, pattern: &str, prefix: Option<&str>) -> Result<bool> {
+    let mut any = false;
+    let mut consumed = 0usize;
+    for seg in content.split_inclusive('\n') {
+        let ln = seg.trim_end_matches(|c| c == '\n' || c == '\r');
+        if is_match(ln, pattern)? {
+            if let Some(pfx) = prefix {
+                print!("{}:{}", pfx, seg);
+            } else {
+                print!("{}", seg);
+            }
+            any = true;
+        }
+        consumed += seg.len();
+    }
+    if consumed < content.len() {
+        let last = &content[consumed..];
+        let ln = last.trim_end_matches('\r');
+        if is_match(ln, pattern)? {
+            if let Some(pfx) = prefix {
+                print!("{}:{}", pfx, last);
+            } else {
+                print!("{}", last);
+            }
+            any = true;
+        }
+    }
+    Ok(any)
+}
+
 /// Backtracking matcher for a sequence of nodes from a position.
 fn match_from(
     pos: usize,
@@ -286,7 +318,14 @@ fn main() {
     }
 }
 
-/// Parses args, reads stdin, runs match, and returns an exit code.
+/// Reads a file and prints matches with optional filename prefixes.
+fn grep_file(file: &str, pattern: &str, prefix: bool) -> Result<bool> {
+    let content = fs::read_to_string(file)?;
+    grep_content(&content, pattern, if prefix { Some(file) } else { None })
+}
+
+/// Parses args, matches against stdin or files, prints matches with optional
+/// prefixes, return 0 on any match
 fn cli() -> Result<i32> {
     let mut args = env::args();
     args.next();
@@ -307,52 +346,13 @@ fn cli() -> Result<i32> {
                 line.pop();
             }
         }
-        let m = is_match(&line, &pattern)?;
-        Ok(if m { 0 } else { 1 })
-    } else if files.len() == 1 {
-        // single file: preserve original behavior (no prefix)
-        let file = &files[0];
-        let content = fs::read_to_string(&file)?;
-        let mut any = false;
-        let mut consumed = 0usize;
-        for seg in content.split_inclusive('\n') {
-            let ln = seg.trim_end_matches(|c| c == '\n' || c == '\r');
-            if is_match(ln, &pattern)? {
-                print!("{}", seg);
-                any = true;
-            }
-            consumed += seg.len();
-        }
-        if consumed < content.len() {
-            let last = &content[consumed..];
-            let ln = last.trim_end_matches('\r');
-            if is_match(ln, &pattern)? {
-                print!("{}", last);
-                any = true;
-            }
-        }
-        Ok(if any { 0 } else { 1 })
+        Ok(if is_match(&line, &pattern)? { 0 } else { 1 })
     } else {
-        // multiple files: prefix matches with "<filename>:"
+        let prefix = files.len() > 1;
         let mut any = false;
         for file in &files {
-            let content = fs::read_to_string(&file)?;
-            let mut consumed = 0usize;
-            for seg in content.split_inclusive('\n') {
-                let ln = seg.trim_end_matches(|c| c == '\n' || c == '\r');
-                if is_match(ln, &pattern)? {
-                    print!("{}:{}", file, seg);
-                    any = true;
-                }
-                consumed += seg.len();
-            }
-            if consumed < content.len() {
-                let last = &content[consumed..];
-                let ln = last.trim_end_matches('\r');
-                if is_match(ln, &pattern)? {
-                    print!("{}:{}", file, last);
-                    any = true;
-                }
+            if grep_file(file, &pattern, prefix)? {
+                any = true;
             }
         }
         Ok(if any { 0 } else { 1 })
