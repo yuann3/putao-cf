@@ -297,12 +297,25 @@ fn cli() -> Result<i32> {
     let pattern = args.next().unwrap_or_default();
     if let Some(file) = args.next() {
         let content = fs::read_to_string(&file)?;
-        let line_no_nl = content.trim_end_matches(|c| c == '\n' || c == '\r');
-        let m = is_match(line_no_nl, &pattern)?;
-        if m {
-            print!("{}", content);
+        let mut any = false;
+        let mut consumed = 0usize;
+        for seg in content.split_inclusive('\n') {
+            let ln = seg.trim_end_matches(|c| c == '\n' || c == '\r');
+            if is_match(ln, &pattern)? {
+                print!("{}", seg);
+                any = true;
+            }
+            consumed += seg.len();
         }
-        Ok(if m {0} else {1})
+        if consumed < content.len() {
+            let last = &content[consumed..];
+            let ln = last.trim_end_matches('\r');
+            if is_match(ln, &pattern)? {
+                print!("{}", last);
+                any = true;
+            }
+        }
+        Ok(if any { 0 } else { 1 })
     } else {
         let mut line = String::new();
         io::stdin().read_line(&mut line)?;
@@ -313,6 +326,6 @@ fn cli() -> Result<i32> {
             }
         }
         let m = is_match(&line, &pattern)?;
-        Ok(if m {0} else {1})
+        Ok(if m { 0 } else { 1 })
     }
 }
