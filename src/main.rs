@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use std::{env, fs, io, path::Path, process};
+use std::{env, fs, io::{self, Read}, path::Path, process};
 
 #[derive(Clone)]
 enum Node {
@@ -156,8 +156,17 @@ fn is_match(input: &str, pat: &str) -> Result<bool> {
     }))
 }
 
-/// Prints amtching lines from content, preserving original line
-/// ending and using and optional prefix
+/// Prints a segment with optional filename prefix, preserving existing newline.
+fn print_with_prefix(prefix: Option<&str>, seg: &str) {
+    match prefix {
+        Some(pfx) if seg.ends_with('\n') => print!("{}:{}", pfx, seg),
+        Some(pfx) => print!("{}:{}\n", pfx, seg),
+        None if seg.ends_with('\n') => print!("{}", seg),
+        None => println!("{}", seg),
+    }
+}
+
+/// Prints matching lines from content with optional prefix; returns true if any matched.
 fn grep_content(content: &str, pattern: &str, prefix: Option<&str>) -> Result<bool> {
     let mut any = false;
     let mut consumed = 0usize;
@@ -165,26 +174,16 @@ fn grep_content(content: &str, pattern: &str, prefix: Option<&str>) -> Result<bo
         let ln = seg.trim_end_matches(|c| c == '\n' || c == '\r');
         if is_match(ln, pattern)? {
             any = true;
-            match prefix {
-                Some(pfx) if seg.ends_with('\n') => print!("{}:{}", pfx, seg),
-                Some(pfx) => print!("{}:{}\n", pfx, seg),
-                None if seg.ends_with('\n') => print!("{}", seg),
-                None => println!("{}", seg),
-            }
+            print_with_prefix(prefix, seg);
         }
         consumed += seg.len();
     }
     if consumed < content.len() {
-        let last = &content[consumed..];
-        let ln = last.trim_end_matches('\r');
+        let seg = &content[consumed..];
+        let ln = seg.trim_end_matches('\r');
         if is_match(ln, pattern)? {
             any = true;
-            match prefix {
-                Some(pfx) if last.ends_with('\n') => print!("{}:{}", pfx, last),
-                Some(pfx) => print!("{}:{}\n", pfx, last),
-                None if last.ends_with('\n') => print!("{}", last),
-                None => println!("{}", last),
-            }
+            print_with_prefix(prefix, seg);
         }
     }
     Ok(any)
@@ -406,15 +405,9 @@ fn cli() -> Result<i32> {
 
     if rest.is_empty() {
         // stdin
-        let mut line = String::new();
-        io::stdin().read_line(&mut line)?;
-        if line.ends_with('\n') {
-            line.pop();
-            if line.ends_with('\r') {
-                line.pop();
-            }
-        }
-        Ok(if is_match(&line, &pattern)? { 0 } else { 1 })
+        let mut buf = String::new();
+        io::stdin().read_to_string(&mut buf)?;
+        Ok(if grep_content(&buf, &pattern, None)? { 0 } else { 1 })
     } else {
         let prefix = rest.len() > 1;
         let mut any = false;
