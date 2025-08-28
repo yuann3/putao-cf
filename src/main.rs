@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use std::{env, fs, io, process};
+use std::{env, fs, io, path::Path, process};
 
 #[derive(Clone)]
 enum Node {
@@ -164,12 +164,13 @@ fn grep_content(content: &str, pattern: &str, prefix: Option<&str>) -> Result<bo
     for seg in content.split_inclusive('\n') {
         let ln = seg.trim_end_matches(|c| c == '\n' || c == '\r');
         if is_match(ln, pattern)? {
-            if let Some(pfx) = prefix {
-                print!("{}:{}", pfx, seg);
-            } else {
-                print!("{}", seg);
-            }
             any = true;
+            match prefix {
+                Some(pfx) if seg.ends_with('\n') => print!("{}:{}", pfx, seg),
+                Some(pfx) => print!("{}:{}\n", pfx, seg),
+                None if seg.ends_with('\n') => print!("{}", seg),
+                None => println!("{}", seg),
+            }
         }
         consumed += seg.len();
     }
@@ -177,15 +178,21 @@ fn grep_content(content: &str, pattern: &str, prefix: Option<&str>) -> Result<bo
         let last = &content[consumed..];
         let ln = last.trim_end_matches('\r');
         if is_match(ln, pattern)? {
-            if let Some(pfx) = prefix {
-                print!("{}:{}", pfx, last);
-            } else {
-                print!("{}", last);
-            }
             any = true;
+            match prefix {
+                Some(pfx) if last.ends_with('\n') => print!("{}:{}", pfx, last),
+                Some(pfx) => print!("{}:{}\n", pfx, last),
+                None if last.ends_with('\n') => print!("{}", last),
+                None => println!("{}", last),
+            }
         }
     }
     Ok(any)
+}
+
+fn grep_file_with_label(path: &Path, pattern: &str, label: &str) -> Result<bool> {
+    let content = fs::read_to_string(path)?;
+    grep_content(&content, pattern, Some(label))
 }
 
 /// Backtracking matcher for a sequence of nodes from a position.
@@ -307,6 +314,49 @@ fn match_from(
     }
 }
 
+/// Recursively searches a directory or file, labeling outputs relateive to procided root arguement
+fn grep_dir(root: &str, pattern: &str) -> Result<bool> {
+    let base = Path::new(root);
+    let label_base = root.trim_end_matches(std::path::MAIN_SEPARATOR);
+    fn walk(
+        base: &Path,
+        label_base: &str,
+        dir: &Path,
+        pattern: &str,
+        any: &mut bool,
+    ) -> Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let ft = entry.file_type()?;
+            if ft.is_dir() {
+                walk(base, label_base, &path, pattern, any)?;
+            } else if ft.is_file() {
+                let rel = path.strip_prefix(base).unwrap_or(&path);
+                let label = if rel.as_os_str().is_empty() {
+                    label_base.to_string()
+                } else {
+                    format!("{}/{}", label_base, rel.display())
+                };
+                if grep_file_with_label(&path, pattern, &label)? {
+                    *any = true;
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut any = false;
+    if base.is_dir() {
+        walk(base, label_base, base, pattern, &mut any)?;
+    } else if base.is_file() {
+        let label = label_base.to_string();
+        if grep_file_with_label(base, pattern, &label)? {
+            any = true;
+        }
+    }
+    Ok(any)
+}
+
 /// CLI entrypoint compatible with the runner contract.
 fn main() {
     match cli() {
@@ -329,14 +379,32 @@ fn grep_file(file: &str, pattern: &str, prefix: bool) -> Result<bool> {
 fn cli() -> Result<i32> {
     let mut args = env::args();
     args.next();
-    let arg1 = args.next().unwrap_or_default();
-    if arg1 != "-E" {
-        bail!("Expected first argument to be '-E'");
+    let mut recursive = false;
+    let mut head = args.next().unwrap_or_default();
+    if head == "-r" {
+        recursive = true;
+        head = args.next().unwrap_or_default();
+    }
+    if head != "-E" {
+        bail!("Expected '-E' after flags");
     }
     let pattern = args.next().unwrap_or_default();
-    let files: Vec<String> = args.collect();
+    let rest: Vec<String> = args.collect();
 
-    if files.is_empty() {
+    if recursive {
+        if rest.is_empty() {
+            return Ok(1);
+        }
+        let mut any = false;
+        for root in &rest {
+            if grep_dir(root, &pattern)? {
+                any = true;
+            }
+        }
+        return Ok(if any { 0 } else { 1 });
+    }
+
+    if rest.is_empty() {
         // stdin
         let mut line = String::new();
         io::stdin().read_line(&mut line)?;
@@ -348,9 +416,9 @@ fn cli() -> Result<i32> {
         }
         Ok(if is_match(&line, &pattern)? { 0 } else { 1 })
     } else {
-        let prefix = files.len() > 1;
+        let prefix = rest.len() > 1;
         let mut any = false;
-        for file in &files {
+        for file in &rest {
             if grep_file(file, &pattern, prefix)? {
                 any = true;
             }
