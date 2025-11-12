@@ -17,6 +17,7 @@ enum Node {
     Opt(Box<Node>),
     Plus(Box<Node>),
     Star(Box<Node>),
+    Rep(Box<Node>, usize),
     Cap(usize, Vec<Vec<Node>>),
     CapEnd(usize, usize),
     Ref(usize),
@@ -114,6 +115,19 @@ fn elems(cs: &[char], i: &mut usize, gid: &mut usize) -> Result<Vec<Node>> {
             } else if *i < cs.len() && cs[*i] == '*' {
                 *i += 1;
                 n = Node::Star(Box::new(n));
+            } else if *i < cs.len() && cs[*i] == '{' {
+                *i += 1;
+                let mut num_str = String::new();
+                while *i < cs.len() && cs[*i].is_ascii_digit() {
+                    num_str.push(cs[*i]);
+                    *i += 1;
+                }
+                if *i >= cs.len() || cs[*i] != '}' {
+                    bail!("invalid repretition quantifier");
+                }
+                *i += 1;
+                let count: usize = num_str.parse()?;
+                n = Node::Rep(Box::new(n), count);
             }
             out.push(n);
         }
@@ -241,6 +255,19 @@ fn match_from(
             } else {
                 match_from(pos, tail, cs, caps)
             }
+        }
+        Node::Rep(inner, count) => {
+            let mut p = pos;
+            let mut c = caps;
+            for _ in 0..*count {
+                if let Some((np, nc)) = match_from(p, &[*(*inner).clone()], cs, c) {
+                    p = np;
+                    c = nc;
+                } else {
+                    return None;
+                }
+            }
+            match_from(p, tail, cs, c)
         }
         Node::Opt(inner) => {
             if let Some((p1, c1)) = match_from(pos, &[(*inner.clone())], cs, caps.clone()) {
