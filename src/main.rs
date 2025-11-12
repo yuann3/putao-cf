@@ -1,5 +1,10 @@
 use anyhow::{bail, Result};
-use std::{env, fs, io::{self, Read}, path::Path, process};
+use std::{
+    env, fs,
+    io::{self, Read},
+    path::Path,
+    process,
+};
 
 #[derive(Clone)]
 enum Node {
@@ -11,6 +16,7 @@ enum Node {
     Neg(String),
     Opt(Box<Node>),
     Plus(Box<Node>),
+    Star(Box<Node>),
     Cap(usize, Vec<Vec<Node>>),
     CapEnd(usize, usize),
     Ref(usize),
@@ -105,6 +111,9 @@ fn elems(cs: &[char], i: &mut usize, gid: &mut usize) -> Result<Vec<Node>> {
             } else if *i < cs.len() && cs[*i] == '?' {
                 *i += 1;
                 n = Node::Opt(Box::new(n));
+            } else if *i < cs.len() && cs[*i] == '*' {
+                *i += 1;
+                n = Node::Star(Box::new(n));
             }
             out.push(n);
         }
@@ -206,25 +215,32 @@ fn match_from(
     }
     let head = &nodes[0];
     let tail = &nodes[1..];
-    match head {
-        Node::Plus(inner) => {
-            fn more(
-                pos: usize,
-                inner: &Node,
-                rest: &[Node],
-                cs: &[char],
-                caps: Vec<Option<String>>,
-            ) -> Option<(usize, Vec<Option<String>>)> {
-                if let Some((p1, c1)) = match_from(pos, &[inner.clone()], cs, caps) {
-                    if let Some((e, c2)) = more(p1, inner, rest, cs, c1.clone()) {
-                        return Some((e, c2));
-                    }
-                    match_from(p1, rest, cs, c1)
-                } else {
-                    None
-                }
+
+    fn more(
+        pos: usize,
+        inner: &Node,
+        rest: &[Node],
+        cs: &[char],
+        caps: Vec<Option<String>>,
+    ) -> Option<(usize, Vec<Option<String>>)> {
+        if let Some((p1, c1)) = match_from(pos, &[inner.clone()], cs, caps) {
+            if let Some((e, c2)) = more(p1, inner, rest, cs, c1.clone()) {
+                return Some((e, c2));
             }
-            more(pos, &*inner, tail, cs, caps)
+            match_from(p1, rest, cs, c1)
+        } else {
+            None
+        }
+    }
+
+    match head {
+        Node::Plus(inner) => more(pos, &*inner, tail, cs, caps),
+        Node::Star(inner) => {
+            if let Some((e, c)) = more(pos, &*inner, tail, cs, caps.clone()) {
+                Some((e, c))
+            } else {
+                match_from(pos, tail, cs, caps)
+            }
         }
         Node::Opt(inner) => {
             if let Some((p1, c1)) = match_from(pos, &[(*inner.clone())], cs, caps.clone()) {
@@ -407,7 +423,11 @@ fn cli() -> Result<i32> {
         // stdin
         let mut buf = String::new();
         io::stdin().read_to_string(&mut buf)?;
-        Ok(if grep_content(&buf, &pattern, None)? { 0 } else { 1 })
+        Ok(if grep_content(&buf, &pattern, None)? {
+            0
+        } else {
+            1
+        })
     } else {
         let prefix = rest.len() > 1;
         let mut any = false;
