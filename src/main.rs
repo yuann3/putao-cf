@@ -42,107 +42,128 @@ fn parse(pattern: &str) -> Result<(Vec<Node>, bool, bool)> {
     Ok((elems(&cs, &mut i, &mut gid)?, start, end))
 }
 
+/// Parses a single base atom (lit, escape, class, group, any) and advances i.
+fn parse_atom(cs: &[char], i: &mut usize, gid: &mut usize) -> Result<Option<Node>> {
+    if *i >= cs.len() {
+        return Ok(None);
+    }
+    let c = cs[*i];
+    let base = if c == '\\' {
+        *i += 1;
+        if *i >= cs.len() {
+            bail!("invalid escape");
+        }
+        let e = cs[*i];
+        *i += 1;
+        match e {
+            'd' => Some(Node::Digit),
+            'w' => Some(Node::Word),
+            '1'..='9' => Some(Node::Ref((e as u8 - b'0') as usize)),
+            _ => Some(Node::Lit(e)),
+        }
+    } else if c == '[' {
+        *i += 1;
+        let neg = *i < cs.len() && cs[*i] == '^';
+        if neg {
+            *i += 1;
+        }
+        let mut s = String::new();
+        while *i < cs.len() && cs[*i] != ']' {
+            s.push(cs[*i]);
+            *i += 1;
+        }
+        if *i >= cs.len() || cs[*i] != ']' {
+            bail!("unclosed class");
+        }
+        *i += 1;
+        Some(if neg { Node::Neg(s) } else { Node::Pos(s) })
+    } else if c == '(' {
+        *i += 1;
+        *gid += 1;
+        let id = *gid;
+        let mut buf = String::new();
+        let mut d = 0;
+        while *i < cs.len() {
+            let ch = cs[*i];
+            *i += 1;
+            if ch == '(' {
+                d += 1;
+            }
+            if ch == ')' {
+                if d == 0 {
+                    break;
+                }
+                d -= 1;
+            }
+            buf.push(ch);
+        }
+        Some(Node::Cap(id, branches(&buf, gid)?))
+    } else if c == '.' {
+        *i += 1;
+        Some(Node::Any)
+    } else if c == ')' {
+        None
+    } else {
+        *i += 1;
+        Some(Node::Lit(c))
+    };
+    Ok(base)
+}
+
+/// Applies a quantifier to the base node if present, advances i.
+fn parse_quantifier(cs: &[char], i: &mut usize, base: Node) -> Result<Node> {
+    if *i >= cs.len() {
+        return Ok(base);
+    }
+    let mut n = base;
+    if cs[*i] == '+' {
+        *i += 1;
+        n = Node::Plus(Box::new(n));
+    } else if cs[*i] == '?' {
+        *i += 1;
+        n = Node::Opt(Box::new(n));
+    } else if cs[*i] == '*' {
+        *i += 1;
+        n = Node::Star(Box::new(n));
+    } else if cs[*i] == '{' {
+        *i += 1;
+        let mut num_str = String::new();
+        while *i < cs.len() && cs[*i].is_ascii_digit() {
+            num_str.push(cs[*i]);
+            *i += 1;
+        }
+        let mut is_min = false;
+        if *i < cs.len() && cs[*i] == ',' {
+            *i += 1;
+            is_min = true;
+        }
+        if *i >= cs.len() || cs[*i] != '}' {
+            bail!("invalid repetition quantifier");
+        }
+        *i += 1;
+        if num_str.is_empty() {
+            bail!("invalid repetition quantifier: missing count");
+        }
+        let count: usize = num_str.parse()?;
+        n = if is_min {
+            Node::MinRep(Box::new(n), count)
+        } else {
+            Node::Rep(Box::new(n), count)
+        };
+    }
+    Ok(n)
+}
+
 /// Parses a sequence of nodes until end or ')'.
 fn elems(cs: &[char], i: &mut usize, gid: &mut usize) -> Result<Vec<Node>> {
     let mut out = Vec::new();
-    while *i < cs.len() {
-        let c = cs[*i];
-        let base = if c == '\\' {
-            *i += 1;
-            if *i >= cs.len() {
-                bail!("invalid escape");
+    loop {
+        match parse_atom(cs, i, gid)? {
+            Some(base) => {
+                let quantified = parse_quantifier(cs, i, base)?;
+                out.push(quantified);
             }
-            let e = cs[*i];
-            *i += 1;
-            match e {
-                'd' => Some(Node::Digit),
-                'w' => Some(Node::Word),
-                '1'..='9' => Some(Node::Ref((e as u8 - b'0') as usize)),
-                _ => Some(Node::Lit(e)),
-            }
-        } else if c == '[' {
-            *i += 1;
-            let neg = *i < cs.len() && cs[*i] == '^';
-            if neg {
-                *i += 1;
-            }
-            let mut s = String::new();
-            while *i < cs.len() && cs[*i] != ']' {
-                s.push(cs[*i]);
-                *i += 1;
-            }
-            if *i >= cs.len() || cs[*i] != ']' {
-                bail!("unclosed class");
-            }
-            *i += 1;
-            Some(if neg { Node::Neg(s) } else { Node::Pos(s) })
-        } else if c == '(' {
-            *i += 1;
-            *gid += 1;
-            let id = *gid;
-            let mut buf = String::new();
-            let mut d = 0;
-            while *i < cs.len() {
-                let ch = cs[*i];
-                *i += 1;
-                if ch == '(' {
-                    d += 1;
-                }
-                if ch == ')' {
-                    if d == 0 {
-                        break;
-                    }
-                    d -= 1;
-                }
-                buf.push(ch);
-            }
-            Some(Node::Cap(id, branches(&buf, gid)?))
-        } else if c == ')' {
-            break;
-        } else if c == '.' {
-            *i += 1;
-            Some(Node::Any)
-        } else {
-            *i += 1;
-            Some(Node::Lit(c))
-        };
-        if let Some(mut n) = base {
-            if *i < cs.len() && cs[*i] == '+' {
-                *i += 1;
-                n = Node::Plus(Box::new(n));
-            } else if *i < cs.len() && cs[*i] == '?' {
-                *i += 1;
-                n = Node::Opt(Box::new(n));
-            } else if *i < cs.len() && cs[*i] == '*' {
-                *i += 1;
-                n = Node::Star(Box::new(n));
-            } else if *i < cs.len() && cs[*i] == '{' {
-                *i += 1;
-                let mut num_str = String::new();
-                while *i < cs.len() && cs[*i].is_ascii_digit() {
-                    num_str.push(cs[*i]);
-                    *i += 1;
-                }
-                let mut is_min = false;
-                if *i < cs.len() && cs[*i] == ',' {
-                    *i += 1;
-                    is_min = true;
-                }
-                if *i >= cs.len() || cs[*i] != '}' {
-                    bail!("invalid repetition quantifier");
-                }
-                *i += 1;
-                if num_str.is_empty() {
-                    bail!("invalid repetition quantifier: missing count");
-                }
-                let count: usize = num_str.parse()?;
-                n = if is_min {
-                    Node::MinRep(Box::new(n), count)
-                } else {
-                    Node::Rep(Box::new(n), count)
-                }
-            }
-            out.push(n);
+            None => break, // End of sequence (e.g., ')')
         }
     }
     Ok(out)
