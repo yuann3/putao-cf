@@ -18,6 +18,7 @@ enum Node {
     Plus(Box<Node>),
     Star(Box<Node>),
     Rep(Box<Node>, usize),
+    MinRep(Box<Node>, usize),
     Cap(usize, Vec<Vec<Node>>),
     CapEnd(usize, usize),
     Ref(usize),
@@ -122,12 +123,24 @@ fn elems(cs: &[char], i: &mut usize, gid: &mut usize) -> Result<Vec<Node>> {
                     num_str.push(cs[*i]);
                     *i += 1;
                 }
+                let mut is_min = false;
+                if *i < cs.len() && cs[*i] == ',' {
+                    *i += 1;
+                    is_min = true;
+                }
                 if *i >= cs.len() || cs[*i] != '}' {
-                    bail!("invalid repretition quantifier");
+                    bail!("invalid repetition quantifier");
                 }
                 *i += 1;
+                if num_str.is_empty() {
+                    bail!("invalid repetition quantifier: missing count");
+                }
                 let count: usize = num_str.parse()?;
-                n = Node::Rep(Box::new(n), count);
+                n = if is_min {
+                    Node::MinRep(Box::new(n), count)
+                } else {
+                    Node::Rep(Box::new(n), count)
+                }
             }
             out.push(n);
         }
@@ -351,6 +364,23 @@ fn match_from(
                 }
             } else {
                 None
+            }
+        }
+        Node::MinRep(inner, min) => {
+            let mut p = pos;
+            let mut c = caps;
+            for _ in 0..*min {
+                if let Some((np, nc)) = match_from(p, &[*inner.clone()], cs, c) {
+                    p = np;
+                    c = nc;
+                } else {
+                    return None;
+                }
+            }
+            if let Some((e, cc)) = more(p, &*inner, tail, cs, c.clone()) {
+                Some((e, cc))
+            } else {
+                match_from(p, tail, cs, c)
             }
         }
     }
