@@ -19,6 +19,7 @@ enum Node {
     Star(Box<Node>),
     Rep(Box<Node>, usize),
     MinRep(Box<Node>, usize),
+    RangeRep(Box<Node>, usize, usize),
     Cap(usize, Vec<Vec<Node>>),
     CapEnd(usize, usize),
     Ref(usize),
@@ -115,7 +116,7 @@ fn parse_quantifier(cs: &[char], i: &mut usize, base: Node) -> Result<Node> {
     if *i >= cs.len() {
         return Ok(base);
     }
-    let mut n = base;
+    let mut n = base.clone();
     if cs[*i] == '+' {
         *i += 1;
         n = Node::Plus(Box::new(n));
@@ -127,29 +128,42 @@ fn parse_quantifier(cs: &[char], i: &mut usize, base: Node) -> Result<Node> {
         n = Node::Star(Box::new(n));
     } else if cs[*i] == '{' {
         *i += 1;
-        let mut num_str = String::new();
+        let mut min_str = String::new();
         while *i < cs.len() && cs[*i].is_ascii_digit() {
-            num_str.push(cs[*i]);
+            min_str.push(cs[*i]);
             *i += 1;
         }
-        let mut is_min = false;
+        if min_str.is_empty() {
+            bail!("invalid repetition quantifier: missing min count");
+        }
+        let min: usize = min_str.parse()?;
         if *i < cs.len() && cs[*i] == ',' {
             *i += 1;
-            is_min = true;
-        }
-        if *i >= cs.len() || cs[*i] != '}' {
-            bail!("invalid repetition quantifier");
-        }
-        *i += 1;
-        if num_str.is_empty() {
-            bail!("invalid repetition quantifier: missing count");
-        }
-        let count: usize = num_str.parse()?;
-        n = if is_min {
-            Node::MinRep(Box::new(n), count)
+            let mut max_str = String::new();
+            while *i < cs.len() && cs[*i].is_ascii_digit() {
+                max_str.push(cs[*i]);
+                *i += 1;
+            }
+            if *i >= cs.len() || cs[*i] != '}' {
+                bail!("invalid repetition quantifier");
+            }
+            *i += 1;
+            if max_str.is_empty() {
+                n = Node::MinRep(Box::new(base), min);
+            } else {
+                let max: usize = max_str.parse()?;
+                if max < min {
+                    bail!("invalid repetition quantifier: max < min");
+                }
+                n = Node::RangeRep(Box::new(base), min, max);
+            }
         } else {
-            Node::Rep(Box::new(n), count)
-        };
+            if *i >= cs.len() || cs[*i] != '}' {
+                bail!("invalid repetition quantifier");
+            }
+            *i += 1;
+            n = Node::Rep(Box::new(base), min);
+        }
     }
     Ok(n)
 }
@@ -281,6 +295,24 @@ fn match_from(
         }
     }
 
+    fn bounded_more(
+        pos: usize,
+        inner: &Node,
+        rest: &[Node],
+        cs: &[char],
+        caps: Vec<Option<String>>,
+        remaining: usize,
+    ) -> Option<(usize, Vec<Option<String>>)> {
+        if remaining > 0 {
+            if let Some((p1, c1)) = match_from(pos, &[inner.clone()], cs, caps.clone()) {
+                if let Some((e, c2)) = bounded_more(p1, inner, rest, cs, c1, remaining - 1) {
+                    return Some((e, c2));
+                }
+            }
+        }
+        match_from(pos, rest, cs, caps)
+    }
+
     match head {
         Node::Plus(inner) => more(pos, &*inner, tail, cs, caps),
         Node::Star(inner) => {
@@ -403,6 +435,20 @@ fn match_from(
             } else {
                 match_from(p, tail, cs, c)
             }
+        }
+        Node::RangeRep(inner, min, max) => {
+            let mut p = pos;
+            let mut c = caps;
+            for _ in 0..*min {
+                if let Some((np, nc)) = match_from(p, &[*inner.clone()], cs, c) {
+                    p = np;
+                    c = nc;
+                } else {
+                    return None;
+                }
+            }
+            let extra = if *max > *min { *max - *min } else { 0 };
+            bounded_more(p, &*inner, tail, cs, c, extra)
         }
     }
 }
